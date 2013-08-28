@@ -89,7 +89,8 @@ void lj_state_shrinkstack(lua_State *L, MSize used)
     return;  /* Avoid stack shrinking while handling stack overflow. */
   if (4*used < L->stacksize &&
       2*(LJ_STACK_START+LJ_STACK_EXTRA) < L->stacksize &&
-      obj2gco(L) != gcref(G(L)->jit_L))  /* Don't shrink stack of live trace. */
+      /* Don't shrink stack of live trace. */
+      (tvref(G(L)->jit_base) == NULL || obj2gco(L) != gcref(G(L)->cur_L)))
     resizestack(L, L->stacksize >> 1);
 }
 
@@ -237,6 +238,7 @@ LUA_API void lua_close(lua_State *L)
 {
   global_State *g = G(L);
   int i;
+  setgcrefnull(g->cur_L);
   L = mainthread(g);  /* Only the main thread can be closed. */
   lj_func_closeuv(L, tvref(L->stack));
   lj_gc_separateudata(g, 1);  /* Separate udata which have GC metamethods. */
@@ -248,8 +250,8 @@ LUA_API void lua_close(lua_State *L)
   for (i = 0;;) {
     hook_enter(g);
     L->status = 0;
-    L->cframe = NULL;
     L->base = L->top = tvref(L->stack) + 1;
+    L->cframe = NULL;
     if (lj_vm_cpcall(L, NULL, NULL, cpfinalize) == 0) {
       if (++i >= 10) break;
       lj_gc_separateudata(g, 1);  /* Separate udata again. */
@@ -281,6 +283,8 @@ lua_State *lj_state_new(lua_State *L)
 void LJ_FASTCALL lj_state_free(global_State *g, lua_State *L)
 {
   lua_assert(L != mainthread(g));
+  if (obj2gco(L) == gcref(g->cur_L))
+    setgcrefnull(g->cur_L);
   lj_func_closeuv(L, tvref(L->stack));
   lua_assert(gcref(L->openupval) == NULL);
   lj_mem_freevec(g, tvref(L->stack), L->stacksize, TValue);

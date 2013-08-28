@@ -355,6 +355,7 @@ static void callhook(lua_State *L, int event, BCLine line)
     hook_enter(g);
     hookf(L, &ar);
     lua_assert(hook_active(g));
+    setgcref(g->cur_L, obj2gco(L));
     hook_leave(g);
   }
 }

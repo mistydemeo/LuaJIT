@@ -609,8 +609,8 @@ typedef struct global_State {
   volatile int32_t vmstate;  /* VM state or current JIT code trace number. */
   BCIns bc_cfunc_int;	/* Bytecode for internal C function calls. */
   BCIns bc_cfunc_ext;	/* Bytecode for external C function calls. */
-  GCRef jit_L;		/* Current JIT code lua_State or NULL. */
-  MRef jit_base;	/* Current JIT code L->base. */
+  GCRef cur_L;		/* Currently executing lua_State. */
+  MRef jit_base;	/* Current JIT code L->base or NULL. */
   MRef ctype_state;	/* Pointer to C type state. */
   GCRef gcroot[GCROOT_MAX];  /* GC roots. */
 } global_State;
