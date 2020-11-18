@@ -264,7 +264,6 @@
 #define LJ_TARGET_UNIFYROT	1	/* Want only IR_BROL. */
 #define LJ_ARCH_NUMMODE		LJ_NUMMODE_SINGLE
 #define LJ_ARCH_NOFFI		1	/* NYI: comparisons, calls. */
-#define LJ_ARCH_NOJIT		1
 
 #elif LUAJIT_TARGET == LUAJIT_ARCH_MIPS
 
