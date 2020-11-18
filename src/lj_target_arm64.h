@@ -1,6 +1,6 @@
 /*
 ** Definitions for ARM64 CPUs.
-** Copyright (C) 2005-2016 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2020 Mike Pall. See Copyright Notice in luajit.h
 */
 
 #ifndef _LJ_TARGET_ARM64_H
@@ -101,16 +101,27 @@ typedef struct {
   int32_t spill[256];		/* Spill slots. */
 } ExitState;
 
-/* PC after instruction that caused an exit. Used to find the trace number. */
-#define EXITSTATE_PCREG		RID_LR
 /* Highest exit + 1 indicates stack check. */
 #define EXITSTATE_CHECKEXIT	1
 
-#define EXITSTUB_SPACING	4
-#define EXITSTUBS_PER_GROUP	32
-
+/* Return the address of a per-trace exit stub. */
+static LJ_AINLINE uint32_t *exitstub_trace_addr_(uint32_t *p, uint32_t exitno)
+{
+  while (*p == (LJ_LE ? 0xd503201f : 0x1f2003d5)) p++;  /* Skip A64I_NOP. */
+  return p + 3 + exitno;
+}
+/* Avoid dependence on lj_jit.h if only including lj_target.h. */
+#define exitstub_trace_addr(T, exitno) \
+  exitstub_trace_addr_((MCode *)((char *)(T)->mcode + (T)->szmcode), (exitno))
 
 /* -- Instructions -------------------------------------------------------- */
+
+/* ARM64 instructions are always little-endian. Swap for ARM64BE. */
+#if LJ_BE
+#define A64I_LE(x)	(lj_bswap(x))
+#else
+#define A64I_LE(x)	(x)
+#endif
 
 /* Instruction fields. */
 #define A64F_D(r)	(r)
@@ -121,9 +132,11 @@ typedef struct {
 #define A64F_IMMR(x)	((x) << 16)
 #define A64F_U16(x)	((x) << 5)
 #define A64F_U12(x)	((x) << 10)
-#define A64F_S26(x)	(x)
-#define A64F_S19(x)	((x) << 5)
+#define A64F_S26(x)	(((uint32_t)(x) & 0x03ffffffu))
+#define A64F_S19(x)	(((uint32_t)(x) & 0x7ffffu) << 5)
+#define A64F_S14(x)	(((uint32_t)(x) & 0x3fffu) << 5)
 #define A64F_S9(x)	((x) << 12)
+#define A64F_BIT(x)	((x) << 19)
 #define A64F_SH(sh, x)	(((sh) << 22) | ((x) << 10))
 #define A64F_EX(ex)	(A64I_EX | ((ex) << 13))
 #define A64F_EXSH(ex,x)	(A64I_EX | ((ex) << 13) | ((x) << 10))
@@ -132,17 +145,24 @@ typedef struct {
 #define A64F_LSL16(x)	(((x) / 16) << 21)
 #define A64F_BSH(sh)	((sh) << 10)
 
+/* Check for valid field range. */
+#define A64F_S_OK(x, b)	((((x) + (1 << (b-1))) >> (b)) == 0)
+
 typedef enum A64Ins {
   A64I_S = 0x20000000,
   A64I_X = 0x80000000,
   A64I_EX = 0x00200000,
+  A64I_ON = 0x00200000,
   A64I_K12 = 0x1a000000,
   A64I_K13 = 0x18000000,
   A64I_LS_U = 0x01000000,
   A64I_LS_S = 0x00800000,
   A64I_LS_R = 0x01200800,
-  A64I_LS_UXTWx = 0x00005000,
-  A64I_LS_LSLx = 0x00007000,
+  A64I_LS_SH = 0x00001000,
+  A64I_LS_UXTWx = 0x00004000,
+  A64I_LS_SXTWx = 0x0000c000,
+  A64I_LS_SXTXx = 0x0000e000,
+  A64I_LS_LSLx = 0x00006000,
 
   A64I_ADDw = 0x0b000000,
   A64I_ADDx = 0x8b000000,
@@ -231,6 +251,10 @@ typedef enum A64Ins {
   A64I_BL = 0x94000000,
   A64I_BR = 0xd61f0000,
   A64I_BLR = 0xd63f0000,
+  A64I_TBZ = 0x36000000,
+  A64I_TBNZ = 0x37000000,
+  A64I_CBZ = 0x34000000,
+  A64I_CBNZ = 0x35000000,
 
   A64I_NOP = 0xd503201f,
 

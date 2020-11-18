@@ -1,6 +1,6 @@
 /*
 ** ARM64 instruction emitter.
-** Copyright (C) 2005-2016 Mike Pall. See Copyright Notice in luajit.h
+** Copyright (C) 2005-2020 Mike Pall. See Copyright Notice in luajit.h
 **
 ** Contributed by Djordje Kovacevic and Stefan Pejic from RT-RK.com.
 ** Sponsored by Cisco Systems, Inc.
@@ -8,8 +8,9 @@
 
 /* -- Constant encoding --------------------------------------------------- */
 
-static uint64_t get_k64val(IRIns *ir)
+static uint64_t get_k64val(ASMState *as, IRRef ref)
 {
+  IRIns *ir = IR(ref);
   if (ir->o == IR_KINT64) {
     return ir_kint64(ir)->u64;
   } else if (ir->o == IR_KGC) {
@@ -17,7 +18,8 @@ static uint64_t get_k64val(IRIns *ir)
   } else if (ir->o == IR_KPTR || ir->o == IR_KKPTR) {
     return (uint64_t)ir_kptr(ir);
   } else {
-    lua_assert(ir->o == IR_KINT || ir->o == IR_KNULL);
+    lj_assertA(ir->o == IR_KINT || ir->o == IR_KNULL,
+	       "bad 64 bit const IR op %d", ir->o);
     return ir->i;  /* Sign-extended. */
   }
 }
@@ -46,7 +48,9 @@ static uint32_t emit_isk13(uint64_t n, int is64)
   if (!n) return 0;  /* Neither all-zero nor all-ones are allowed. */
   do {  /* Find the repeat width. */
     if (is64 && (uint32_t)(n^(n>>32))) break;
-    n = (uint32_t)n; w = 32; if ((n^(n>>16)) & 0xffff) break;
+    n = (uint32_t)n;
+    if (!n) return 0;  /* Ditto when passing n=0xffffffff and is64=0. */
+    w = 32; if ((n^(n>>16)) & 0xffff) break;
     n = n & 0xffff; w = 16; if ((n^(n>>8)) & 0xff) break;
     n = n & 0xff; w = 8; if ((n^(n>>4)) & 0xf) break;
     n = n & 0xf; w = 4; if ((n^(n>>2)) & 0x3) break;
@@ -71,6 +75,11 @@ static uint32_t emit_isfpk64(uint64_t n)
 }
 
 /* -- Emit basic instructions --------------------------------------------- */
+
+static void emit_dnma(ASMState *as, A64Ins ai, Reg rd, Reg rn, Reg rm, Reg ra)
+{
+  *--as->mcp = ai | A64F_D(rd) | A64F_N(rn) | A64F_M(rm) | A64F_A(ra);
+}
 
 static void emit_dnm(ASMState *as, A64Ins ai, Reg rd, Reg rn, Reg rm)
 {
@@ -115,7 +124,7 @@ static int emit_checkofs(A64Ins ai, int64_t ofs)
 static void emit_lso(ASMState *as, A64Ins ai, Reg rd, Reg rn, int64_t ofs)
 {
   int ot = emit_checkofs(ai, ofs), sc = (ai >> 30) & 3;
-  lua_assert(ot);
+  lj_assertA(ot, "load/store offset %d out of range", ofs);
   /* Combine LDR/STR pairs to LDP/STP. */
   if ((sc == 2 || sc == 3) &&
       (!(ai & 0x400000) || rd != rn) &&
@@ -133,7 +142,7 @@ static void emit_lso(ASMState *as, A64Ins ai, Reg rd, Reg rn, int64_t ofs)
     } else {
       goto nopair;
     }
-    if (ofsm >= (-64<<sc) && ofsm <= (63<<sc)) {
+    if (ofsm >= (int)((unsigned int)-64<<sc) && ofsm <= (63<<sc)) {
       *as->mcp = aip | A64F_N(rn) | ((ofsm >> sc) << 15) |
 	(ai ^ ((ai == A64I_LDRx || ai == A64I_STRx) ? 0x50000000 : 0x90000000));
       return;
@@ -159,10 +168,10 @@ static int emit_kdelta(ASMState *as, Reg rd, uint64_t k, int lim)
   while (work) {
     Reg r = rset_picktop(work);
     IRRef ref = regcost_ref(as->cost[r]);
-    lua_assert(r != rd);
+    lj_assertA(r != rd, "dest reg %d not free", rd);
     if (ref < REF_TRUE) {
       uint64_t kx = ra_iskref(ref) ? (uint64_t)ra_krefk(as, ref) :
-				     get_k64val(IR(ref));
+				     get_k64val(as, ref);
       int64_t delta = (int64_t)(k - kx);
       if (delta == 0) {
 	emit_dm(as, A64I_MOVx, rd, r);
@@ -232,9 +241,9 @@ static void emit_loadk(ASMState *as, Reg rd, uint64_t u64, int is64)
 #define glofs(as, k) \
   ((intptr_t)((uintptr_t)(k) - (uintptr_t)&J2GG(as->J)->g))
 #define mcpofs(as, k) \
-  ((intptr_t)((uintptr_t)(k) - (uintptr_t)as->mcp))
+  ((intptr_t)((uintptr_t)(k) - (uintptr_t)(as->mcp - 1)))
 #define checkmcpofs(as, k) \
-  ((((mcpofs(as, k)>>2) + 0x00040000) >> 19) == 0)
+  (A64F_S_OK(mcpofs(as, k)>>2, 19))
 
 static Reg ra_allock(ASMState *as, intptr_t k, RegSet allow);
 
@@ -303,20 +312,36 @@ typedef MCode *MCLabel;
 
 static void emit_cond_branch(ASMState *as, A64CC cond, MCode *target)
 {
-  MCode *p = as->mcp;
-  ptrdiff_t delta = target - (p - 1);
-  lua_assert(((delta + 0x40000) >> 19) == 0);
-  *--p = A64I_BCC | A64F_S19((uint32_t)delta & 0x7ffff) | cond;
-  as->mcp = p;
+  MCode *p = --as->mcp;
+  ptrdiff_t delta = target - p;
+  lj_assertA(A64F_S_OK(delta, 19), "branch target out of range");
+  *p = A64I_BCC | A64F_S19(delta) | cond;
 }
 
 static void emit_branch(ASMState *as, A64Ins ai, MCode *target)
 {
-  MCode *p = as->mcp;
-  ptrdiff_t delta = target - (p - 1);
-  lua_assert(((delta + 0x02000000) >> 26) == 0);
-  *--p = ai | ((uint32_t)delta & 0x03ffffffu);
-  as->mcp = p;
+  MCode *p = --as->mcp;
+  ptrdiff_t delta = target - p;
+  lj_assertA(A64F_S_OK(delta, 26), "branch target out of range");
+  *p = ai | A64F_S26(delta);
+}
+
+static void emit_tnb(ASMState *as, A64Ins ai, Reg r, uint32_t bit, MCode *target)
+{
+  MCode *p = --as->mcp;
+  ptrdiff_t delta = target - p;
+  lj_assertA(bit < 63, "bit number out of range");
+  lj_assertA(A64F_S_OK(delta, 14), "branch target out of range");
+  if (bit > 31) ai |= A64I_X;
+  *p = ai | A64F_BIT(bit & 31) | A64F_S14(delta) | r;
+}
+
+static void emit_cnb(ASMState *as, A64Ins ai, Reg r, MCode *target)
+{
+  MCode *p = --as->mcp;
+  ptrdiff_t delta = target - p;
+  lj_assertA(A64F_S_OK(delta, 19), "branch target out of range");
+  *p = ai | A64F_S19(delta) | r;
 }
 
 #define emit_jmp(as, target)	emit_branch(as, A64I_B, (target))
@@ -325,8 +350,8 @@ static void emit_call(ASMState *as, void *target)
 {
   MCode *p = --as->mcp;
   ptrdiff_t delta = (char *)target - (char *)p;
-  if ((((delta>>2) + 0x02000000) >> 26) == 0) {
-    *p = A64I_BL | ((uint32_t)(delta>>2) & 0x03ffffffu);
+  if (A64F_S_OK(delta>>2, 26)) {
+    *p = A64I_BL | A64F_S26(delta>>2);
   } else {  /* Target out of range: need indirect call. But don't use R0-R7. */
     Reg r = ra_allock(as, i64ptr(target),
 		      RSET_RANGE(RID_X8, RID_MAX_GPR)-RSET_FIXED);
